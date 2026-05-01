@@ -64,15 +64,18 @@ def root():
 
 @app.post("/ejecutar")
 async def ejecutar_tarea(request: Request):
+    print("1. Petición recibida")
     datos = await request.json()
     tarea = datos.get("tarea")
     url_inicio = datos.get("url", "https://www.google.com")
 
     async with async_playwright() as p:
+        print("2. Iniciando Playwright...")
         navegador = await p.chromium.launch(
             headless=True,
             args=["--no-sandbox", "--disable-setuid-sandbox"]
         )
+        print("3. Navegador abierto")
         pagina = await navegador.new_page()
         await pagina.goto(url_inicio)
 
