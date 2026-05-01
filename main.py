@@ -89,7 +89,7 @@ async def ejecutar_tarea(request: Request):
             elif accion.lower().startswith("click en"):
                 texto = accion.replace("click en", "").replace("Click en", "").strip()
                 try:
-                    await pagina.click(f"text={texto}")
+                    await pagina.get_by_text(texto, exact=False).click()
                 except:
                     pass
             elif accion.lower().startswith("escribir"):
