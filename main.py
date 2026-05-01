@@ -3,7 +3,21 @@ from playwright.async_api import async_playwright
 from groq import Groq
 import base64
 
-app = FastAPI()
+app = FastAPI(
+    title="Agente IA",
+    docs_url="/docs",
+    openapi_url="/openapi.json" # Forzamos que se genere en esta ruta
+)
+
+# Añade este middleware para evitar problemas de CORS (muy común en Render)
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 client = Groq(api_key="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")
 
 async def capturar_pantalla(page):
