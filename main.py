@@ -2,14 +2,14 @@ from fastapi import FastAPI, Request
 from playwright.async_api import async_playwright
 from groq import Groq
 import base64
+import os
 
 app = FastAPI(
     title="Agente IA",
     docs_url="/docs",
-    openapi_url="/openapi.json" # Forzamos que se genere en esta ruta
+    openapi_url="/openapi.json"
 )
 
-# Añade este middleware para evitar problemas de CORS (muy común en Render)
 from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
@@ -18,45 +18,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# RECOMENDACIÓN: Usa os.environ.get("GROQ_API_KEY") en Render Settings por seguridad
 client = Groq(api_key="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")
 
 async def capturar_pantalla(page):
-    screenshot = await page.screenshot()
+    # Optimizamos la captura para que no pese tanto
+    screenshot = await page.screenshot(type="jpeg", quality=50)
     return base64.b64encode(screenshot).decode()
 
 async def preguntarle_a_groq(tarea, pantalla_base64):
-    respuesta = client.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"""Eres un agente que controla un navegador web.
-Tu tarea es: {tarea}
+    try:
+        respuesta = client.chat.completions.create(
+            model="llama-3.2-11b-vision-preview",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"""Eres un agente que controla un navegador web.
+Tarea actual: {tarea}
 
-Mira la pantalla y dime exactamente qué acción hacer ahora.
-Responde SOLO con una de estas opciones:
-- click en [texto exacto del botón o enlace]
-- escribir [texto] en [nombre del campo]
-- navegar a [url]
-- tarea completada
+Instrucciones de respuesta:
+1. Si aún necesitas navegar, responde SOLO con: click en [texto], escribir [texto] en [campo], o navegar a [url].
+2. Si ya ves la información solicitada en la pantalla (como el precio), responde: 'La información es [dato encontrado], tarea completada'.
 
-Responde SOLO con la acción, nada más."""
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{pantalla_base64}"
+Mira la pantalla y dime la acción o respuesta final:"""
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{pantalla_base64}"
+                            }
                         }
-                    }
-                ]
-            }
-        ],
-        max_tokens=100
-    )
-    return respuesta.choices[0].message.content.strip()
+                    ]
+                }
+            ],
+            max_tokens=100
+        )
+        return respuesta.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"Error en Groq: {e}", flush=True)
+        return "Error"
 
 @app.get("/")
 def root():
@@ -64,60 +68,78 @@ def root():
 
 @app.post("/ejecutar")
 async def ejecutar_tarea(request: Request):
-    print("1. Petición recibida")
+    print("1. Petición recibida", flush=True)
     datos = await request.json()
     tarea = datos.get("tarea")
     url_inicio = datos.get("url", "https://www.google.com")
 
     async with async_playwright() as p:
-        print("2. Iniciando Playwright...")
+        print("2. Iniciando Playwright...", flush=True)
         navegador = await p.chromium.launch(
             headless=True,
             args=[
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",  # Crucial para Docker/Render
-                "--disable-gpu",            # Ahorra recursos
-                "--single-process"          # Reduce consumo de RAM
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process"
             ]
         )
-        print("3. Navegador abierto")
-        pagina = await navegador.new_page()
+        
+        print("3. Navegador abierto", flush=True)
+        contexto = await navegador.new_context(viewport={'width': 1280, 'height': 720})
+        pagina = await contexto.new_page()
         await pagina.goto(url_inicio)
 
         pasos = []
 
-        for intento in range(20):
+        # Reducimos a 10 pasos para evitar timeouts excesivos en Render
+        for intento in range(10):
+            print(f"--- Intento {intento + 1} ---", flush=True)
             pantalla = await capturar_pantalla(pagina)
             accion = await preguntarle_a_groq(tarea, pantalla)
-
+            
+            print(f"Acción decidida: {accion}", flush=True)
             pasos.append(accion)
 
-            if "tarea completada" in accion.lower():
+            if "tarea completada" in accion.lower() or "error" in accion.lower():
                 break
-            elif accion.lower().startswith("click en"):
-                texto = accion.replace("click en", "").replace("Click en", "").strip()
+            
+            elif "click en" in accion.lower():
+                texto = accion.lower().replace("click en", "").strip()
                 try:
-                    await pagina.get_by_text(texto, exact=False).click()
+                    # Intento de click más robusto
+                    await pagina.get_by_text(texto, exact=False).click(timeout=5000)
                 except:
                     pass
-            elif accion.lower().startswith("escribir"):
-                partes = accion.split(" en ")
-                texto = partes[0].replace("escribir", "").replace("Escribir", "").strip()
-                campo = partes[1].strip() if len(partes) > 1 else ""
+            
+            elif "escribir" in accion.lower():
+                partes = accion.lower().split(" en ")
+                texto_escribir = partes[0].replace("escribir", "").strip()
+                
                 try:
-                    await pagina.fill(f"[placeholder*='{campo}']", texto)
-                except:
-                    pass
-            elif accion.lower().startswith("navegar a"):
-                url = accion.replace("navegar a", "").replace("Navegar a", "").strip()
+                    # Selector universal para barras de búsqueda (Google y otros)
+                    selector = "textarea, input[type='text'], input[type='search'], [role='combobox']"
+                    campo = await pagina.wait_for_selector(selector, timeout=5000)
+                    await campo.fill(texto_escribir)
+                    await campo.press("Enter") # <-- ESTO HACE QUE LA BÚSQUEDA SE EJECUTE
+                    print(f"Texto '{texto_escribir}' enviado con Enter", flush=True)
+                except Exception as e:
+                    print(f"Fallo al escribir: {e}", flush=True)
+            
+            elif "navegar a" in accion.lower():
+                url = accion.lower().replace("navegar a", "").strip()
+                if not url.startswith("http"):
+                    url = f"https://{url}"
                 await pagina.goto(url)
 
-            await pagina.wait_for_timeout(2000)
+            # Esperamos a que la página reaccione antes del siguiente ciclo
+            await pagina.wait_for_timeout(3000)
 
         await navegador.close()
+        print("Tarea finalizada.", flush=True)
 
         return {
-            "estado": "completado",
+            "estado": "proceso terminado",
             "pasos": pasos
         }
