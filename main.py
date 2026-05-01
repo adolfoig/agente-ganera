@@ -73,7 +73,13 @@ async def ejecutar_tarea(request: Request):
         print("2. Iniciando Playwright...")
         navegador = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"]
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",  # Crucial para Docker/Render
+                "--disable-gpu",            # Ahorra recursos
+                "--single-process"          # Reduce consumo de RAM
+            ]
         )
         print("3. Navegador abierto")
         pagina = await navegador.new_page()
