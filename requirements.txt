@@ -3,4 +3,4 @@ uvicorn
 requests
 groq
 Pillow
-playwright
+playwright==1.45.0
