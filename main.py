@@ -25,73 +25,54 @@ async def capturar_pantalla(page):
     return base64.b64encode(screenshot).decode()
 
 async def preguntarle_a_groq(tarea, pantalla_base64):
-
     try:
-
-        # IMPORTANTE: Asegúrate de que este modelo esté disponible en tu cuenta
-
-        # Si da error 400, prueba con "llama-3.2-11b-vision-preview"
-
         respuesta = client.chat.completions.create(
-
             model="meta-llama/llama-4-scout-17b-16e-instruct",
-
             messages=[
-
                 {
-
                     "role": "user",
-
                     "content": [
-
                         {
-
                             "type": "text",
-
                             "text": f"""Eres un agente que controla un navegador web.
+Tarea: {tarea}
 
-Tarea actual: {tarea}
+REGLAS ESTRICTAS:
+- Responde SOLO con UNA línea
+- Sin explicaciones, sin puntos, sin comillas
+- Usa EXACTAMENTE uno de estos formatos:
 
-Instrucciones de respuesta:
+escribir TEXTO_A_ESCRIBIR
+click en TEXTO_DEL_BOTON
+navegar a URL
+tarea completada RESULTADO
 
-1. Si aún necesitas navegar, responde SOLO con: click en [texto], escribir [texto] en [campo], o navegar a [url].
+Ejemplos correctos:
+escribir precio bitcoin
+click en Buscar
+navegar a https://duckduckgo.com
+tarea completada El precio es 94000 USD
 
-2. Si ya ves la información solicitada en la pantalla, responde: 'La información es [dato encontrado], tarea completada'.
-
-Mira la pantalla y dime la acción o respuesta final:"""
-
+¿Qué ves en pantalla y qué acción hay que hacer?"""
                         },
-
                         {
-
                             "type": "image_url",
-
                             "image_url": {
-
                                 "url": f"data:image/jpeg;base64,{pantalla_base64}"
-
                             }
-
                         }
-
                     ]
-
                 }
-
             ],
-
-            max_tokens=100
-
+            max_tokens=50
         )
-
-        return respuesta.choices[0].message.content.strip()
-
+        respuesta_texto = respuesta.choices[0].message.content.strip()
+        primera_linea = respuesta_texto.split('\n')[0].strip()
+        return primera_linea
     except Exception as e:
-
         print(f"Error en Groq: {e}", flush=True)
+        return "error"
 
-        return "Error"
-        
 @app.get("/")
 def root():
     return {"estado": "agente funcionando"}
@@ -100,7 +81,7 @@ def root():
 async def ejecutar_tarea(request: Request):
     datos = await request.json()
     tarea = datos.get("tarea")
-    url_inicio = datos.get("url", "https://www.google.com")
+    url_inicio = datos.get("url", "https://duckduckgo.com")
 
     async with async_playwright() as p:
         navegador = await p.chromium.launch(
@@ -132,10 +113,11 @@ async def ejecutar_tarea(request: Request):
 
         pagina = await contexto.new_page()
         await pagina.goto(url_inicio)
+        await pagina.wait_for_timeout(2000)
 
         pasos = []
 
-        for intento in range(10):
+        for intento in range(15):
             print(f"--- Intento {intento + 1} ---", flush=True)
 
             pantalla = await capturar_pantalla(pagina)
@@ -146,23 +128,33 @@ async def ejecutar_tarea(request: Request):
 
             if "tarea completada" in accion.lower() or "error" in accion.lower():
                 break
-            elif "click en" in accion.lower():
+
+            elif accion.lower().startswith("escribir"):
+                texto_escribir = accion.lower().replace("escribir", "").strip()
+                try:
+                    await pagina.keyboard.press("Tab")
+                    selector = "input[type='text'], input[type='search'], textarea, [name='q'], [role='combobox'], [role='searchbox']"
+                    campo = await pagina.wait_for_selector(selector, timeout=5000)
+                    await campo.click()
+                    await campo.fill("")
+                    await campo.type(texto_escribir, delay=50)
+                    await pagina.wait_for_timeout(500)
+                    await campo.press("Enter")
+                    print(f"Escrito: {texto_escribir}", flush=True)
+                except Exception as e:
+                    print(f"Fallo al escribir: {e}", flush=True)
+
+            elif accion.lower().startswith("click en"):
                 texto = accion.lower().replace("click en", "").strip()
                 try:
                     await pagina.get_by_text(texto, exact=False).first.click(timeout=5000)
                 except:
-                    pass
-            elif "escribir" in accion.lower():
-                partes = accion.lower().split(" en ")
-                texto_escribir = partes[0].replace("escribir", "").strip()
-                try:
-                    selector = "textarea, input[type='text'], input[type='search'], [role='combobox']"
-                    campo = await pagina.wait_for_selector(selector, timeout=5000)
-                    await campo.fill(texto_escribir)
-                    await campo.press("Enter")
-                except Exception as e:
-                    print(f"Fallo al escribir: {e}", flush=True)
-            elif "navegar a" in accion.lower():
+                    try:
+                        await pagina.locator(f"[aria-label*='{texto}']").first.click(timeout=3000)
+                    except:
+                        pass
+
+            elif accion.lower().startswith("navegar a"):
                 url = accion.lower().replace("navegar a", "").strip()
                 if not url.startswith("http"):
                     url = f"https://{url}"
