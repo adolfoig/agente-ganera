@@ -91,7 +91,7 @@ async def ejecutar_tarea(request: Request):
     global ultima_pantalla
     datos = await request.json()
     tarea = datos.get("tarea")
-    url_inicio = datos.get("url", "https://duckduckgo.com")
+    url_inicio = datos.get("url", "https://www.bing.com")
 
     async with async_playwright() as p:
         navegador = await p.chromium.launch(
@@ -160,8 +160,16 @@ async def ejecutar_tarea(request: Request):
                     print(f"Fallo al escribir: {e}", flush=True)
 
             elif accion.lower().startswith("escribir") and ya_busco:
-                print("Ya se realizó la búsqueda, esperando resultados...", flush=True)
-                await pagina.wait_for_timeout(2000)
+                texto_escribir = accion.lower().replace("escribir", "").strip()
+                try:
+                    url_busqueda = f"https://www.bing.com/search?q={texto_escribir.replace(' ', '+')}"
+                    await pagina.goto(url_busqueda)
+                    await pagina.wait_for_load_state("networkidle")
+                    await pagina.wait_for_timeout(3000)
+                    print(f"Buscado directamente: {texto_escribir}", flush=True)
+                    ya_busco = True
+                except Exception as e:
+                    print(f"Fallo al buscar: {e}", flush=True)
 
             elif accion.lower().startswith("click en"):
                 texto = accion.lower().replace("click en", "").strip()
