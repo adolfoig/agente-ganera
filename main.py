@@ -19,7 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-client = Groq(api_key="TU_API_KEY_DE_GROQ")
+client = Groq(api_key="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")
 
 ultima_pantalla = ""
 historial_pantallas = []
