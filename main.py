@@ -53,6 +53,8 @@ click en Buscar
 navegar a https://duckduckgo.com
 tarea completada El precio es 94000 USD
 
+IMPORTANTE: Si ya ves resultados de búsqueda en pantalla, responde con tarea completada y el resultado que ves. No sigas buscando si ya hay resultados visibles.
+
 ¿Qué ves en pantalla y qué acción hay que hacer?"""
                         },
                         {
@@ -113,9 +115,11 @@ async def ejecutar_tarea(request: Request):
 
         pagina = await contexto.new_page()
         await pagina.goto(url_inicio)
+        await pagina.wait_for_load_state("networkidle")
         await pagina.wait_for_timeout(2000)
 
         pasos = []
+        ya_busco = False
 
         for intento in range(15):
             print(f"--- Intento {intento + 1} ---", flush=True)
@@ -129,10 +133,9 @@ async def ejecutar_tarea(request: Request):
             if "tarea completada" in accion.lower() or "error" in accion.lower():
                 break
 
-            elif accion.lower().startswith("escribir"):
+            elif accion.lower().startswith("escribir") and not ya_busco:
                 texto_escribir = accion.lower().replace("escribir", "").strip()
                 try:
-                    await pagina.keyboard.press("Tab")
                     selector = "input[type='text'], input[type='search'], textarea, [name='q'], [role='combobox'], [role='searchbox']"
                     campo = await pagina.wait_for_selector(selector, timeout=5000)
                     await campo.click()
@@ -140,14 +143,24 @@ async def ejecutar_tarea(request: Request):
                     await campo.type(texto_escribir, delay=50)
                     await pagina.wait_for_timeout(500)
                     await campo.press("Enter")
-                    print(f"Escrito: {texto_escribir}", flush=True)
+                    print(f"Escrito y buscado: {texto_escribir}", flush=True)
+                    ya_busco = True
+                    # Esperar a que carguen los resultados
+                    await pagina.wait_for_load_state("networkidle")
+                    await pagina.wait_for_timeout(3000)
                 except Exception as e:
                     print(f"Fallo al escribir: {e}", flush=True)
+
+            elif accion.lower().startswith("escribir") and ya_busco:
+                print("Ya se realizó la búsqueda, esperando resultados...", flush=True)
+                await pagina.wait_for_timeout(2000)
 
             elif accion.lower().startswith("click en"):
                 texto = accion.lower().replace("click en", "").strip()
                 try:
                     await pagina.get_by_text(texto, exact=False).first.click(timeout=5000)
+                    await pagina.wait_for_load_state("networkidle")
+                    await pagina.wait_for_timeout(2000)
                 except:
                     try:
                         await pagina.locator(f"[aria-label*='{texto}']").first.click(timeout=3000)
@@ -159,8 +172,10 @@ async def ejecutar_tarea(request: Request):
                 if not url.startswith("http"):
                     url = f"https://{url}"
                 await pagina.goto(url)
+                await pagina.wait_for_load_state("networkidle")
+                await pagina.wait_for_timeout(2000)
 
-            await pagina.wait_for_timeout(3000)
+            await pagina.wait_for_timeout(2000)
 
         await navegador.close()
 
