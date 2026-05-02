@@ -28,7 +28,8 @@ async def capturar_pantalla(page):
     screenshot = await page.screenshot(type="jpeg", quality=60)
     return base64.b64encode(screenshot).decode()
 
-async def preguntarle_a_groq(tarea, pantalla_base64):
+async def preguntarle_a_groq(tarea, pantalla_base64, pasos_anteriores=[]):
+    pasos_str = "\n".join([f"- {p}" for p in pasos_anteriores]) if pasos_anteriores else "Ninguno todavía"
     try:
         respuesta = client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
@@ -41,9 +42,13 @@ async def preguntarle_a_groq(tarea, pantalla_base64):
                             "text": f"""Eres un agente que controla un navegador web.
 Tarea: {tarea}
 
+Pasos que ya has ejecutado:
+{pasos_str}
+
 REGLAS ESTRICTAS:
 - Responde SOLO con UNA línea
 - Sin explicaciones, sin puntos, sin comillas
+- NO repitas un paso que ya hayas hecho
 - Usa EXACTAMENTE uno de estos formatos:
 
 escribir_campo SELECTOR:::TEXTO
@@ -51,20 +56,16 @@ click en TEXTO_DEL_BOTON
 navegar a URL
 tarea completada RESULTADO
 
-EJEMPLOS para login:
-escribir_campo input[name='usuario']:::miusuario
-escribir_campo input[name='password']:::mipassword
-escribir_campo input[type='text']:::miusuario
-escribir_campo input[type='password']:::mipassword
-click en Entrar
-tarea completada Login realizado correctamente
+FLUJO DE LOGIN:
+1. Primero escribe el usuario en input[type='text']
+2. Luego escribe la contraseña en input[type='password']
+3. Luego haz click en el botón de entrar
+4. Si ya estás dentro responde tarea completada
 
-IMPORTANTE:
-- Para rellenar campos de login usa escribir_campo con el selector CSS y el texto separados por :::
-- Si ves que ya estás logueado o dentro del sistema responde con tarea completada
-- Si ves un mensaje de error de login responde con tarea completada ERROR de login
+Si ya escribiste el usuario, escribe ahora la contraseña.
+Si ya escribiste usuario y contraseña, haz click en entrar.
 
-¿Qué acción hacer?"""
+¿Qué acción hacer AHORA?"""
                         },
                         {
                             "type": "image_url",
@@ -91,9 +92,9 @@ def root():
 @app.get("/pantalla", response_class=HTMLResponse)
 def ver_pantalla():
     global ultima_pantalla, historial_pantallas
-    if not ultima_pantalla:
+    if not historial_pantallas:
         return "<h2>No hay pantalla guardada todavía</h2>"
-    
+
     html = """
     <html>
     <head>
@@ -110,7 +111,7 @@ def ver_pantalla():
     <body>
         <h2>Historial de pantallas del agente</h2>
     """
-    
+
     for i, (accion, img) in enumerate(historial_pantallas):
         clase = "ultima" if i == len(historial_pantallas) - 1 else ""
         html += f"""
@@ -119,7 +120,7 @@ def ver_pantalla():
             <img src='data:image/jpeg;base64,{img}'/>
         </div>
         """
-    
+
     html += "</body></html>"
     return html
 
@@ -177,14 +178,14 @@ async def ejecutar_tarea(request: Request):
 
             pantalla = await capturar_pantalla(pagina)
             ultima_pantalla = pantalla
-
-            accion = await preguntarle_a_groq(tarea, pantalla)
+            accion = await preguntarle_a_groq(tarea, pantalla, pasos)
             print(f"Acción: {accion}", flush=True)
             pasos.append(accion)
-
             historial_pantallas.append((accion, pantalla))
 
             if "tarea completada" in accion.lower() or "error" in accion.lower():
+                pantalla_final = await capturar_pantalla(pagina)
+                historial_pantallas.append(("pantalla final", pantalla_final))
                 break
 
             elif accion.lower().startswith("escribir_campo"):
@@ -201,12 +202,6 @@ async def ejecutar_tarea(request: Request):
                     await pagina.wait_for_timeout(500)
                 except Exception as e:
                     print(f"Fallo escribir_campo: {e}", flush=True)
-                    try:
-                        selector_generico = "input[type='text'], input[type='search'], input[name*='user'], input[name*='login']"
-                        campo = await pagina.wait_for_selector(selector_generico, timeout=3000)
-                        await campo.fill(texto)
-                    except:
-                        pass
 
             elif accion.lower().startswith("escribir"):
                 texto_escribir = accion.lower().replace("escribir", "").strip()
