@@ -3,6 +3,7 @@ from playwright.async_api import async_playwright
 from groq import Groq
 import base64
 import os
+from playwright_stealth import stealth_async
 
 app = FastAPI(
     title="Agente IA",
@@ -97,6 +98,7 @@ async def ejecutar_tarea(request: Request):
         )
         
         pagina = await contexto.new_page()
+        await stealth_async(pagina)
         await pagina.goto(url_inicio)
 
         pasos = []
