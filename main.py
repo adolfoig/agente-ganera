@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
 from playwright.async_api import async_playwright
 from groq import Groq
 import base64
@@ -20,8 +21,10 @@ app.add_middleware(
 
 client = Groq(api_key="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")
 
+ultima_pantalla = ""
+
 async def capturar_pantalla(page):
-    screenshot = await page.screenshot(type="jpeg", quality=50)
+    screenshot = await page.screenshot(type="jpeg", quality=60)
     return base64.b64encode(screenshot).decode()
 
 async def preguntarle_a_groq(tarea, pantalla_base64):
@@ -47,15 +50,12 @@ click en TEXTO_DEL_BOTON
 navegar a URL
 tarea completada RESULTADO
 
-Ejemplos correctos:
-escribir precio bitcoin
-click en Buscar
-navegar a https://duckduckgo.com
-tarea completada El precio es 94000 USD
+IMPORTANTE: 
+- Si ves resultados de búsqueda en pantalla, responde SIEMPRE con: tarea completada [el resultado que ves]
+- Si ves precios, números, información relevante, responde con tarea completada
+- Solo usa escribir si el campo de búsqueda está vacío y no hay resultados
 
-IMPORTANTE: Si ya ves resultados de búsqueda en pantalla, responde con tarea completada y el resultado que ves. No sigas buscando si ya hay resultados visibles.
-
-¿Qué ves en pantalla y qué acción hay que hacer?"""
+¿Qué acción hacer?"""
                         },
                         {
                             "type": "image_url",
@@ -66,7 +66,7 @@ IMPORTANTE: Si ya ves resultados de búsqueda en pantalla, responde con tarea co
                     ]
                 }
             ],
-            max_tokens=50
+            max_tokens=80
         )
         respuesta_texto = respuesta.choices[0].message.content.strip()
         primera_linea = respuesta_texto.split('\n')[0].strip()
@@ -79,8 +79,16 @@ IMPORTANTE: Si ya ves resultados de búsqueda en pantalla, responde con tarea co
 def root():
     return {"estado": "agente funcionando"}
 
+@app.get("/pantalla", response_class=HTMLResponse)
+def ver_pantalla():
+    global ultima_pantalla
+    if not ultima_pantalla:
+        return "<h2>No hay pantalla guardada todavía</h2>"
+    return f"<img src='data:image/jpeg;base64,{ultima_pantalla}' style='max-width:100%'/>"
+
 @app.post("/ejecutar")
 async def ejecutar_tarea(request: Request):
+    global ultima_pantalla
     datos = await request.json()
     tarea = datos.get("tarea")
     url_inicio = datos.get("url", "https://duckduckgo.com")
@@ -125,8 +133,9 @@ async def ejecutar_tarea(request: Request):
             print(f"--- Intento {intento + 1} ---", flush=True)
 
             pantalla = await capturar_pantalla(pagina)
-            accion = await preguntarle_a_groq(tarea, pantalla)
+            ultima_pantalla = pantalla
 
+            accion = await preguntarle_a_groq(tarea, pantalla)
             print(f"Acción: {accion}", flush=True)
             pasos.append(accion)
 
@@ -145,9 +154,8 @@ async def ejecutar_tarea(request: Request):
                     await campo.press("Enter")
                     print(f"Escrito y buscado: {texto_escribir}", flush=True)
                     ya_busco = True
-                    # Esperar a que carguen los resultados
                     await pagina.wait_for_load_state("networkidle")
-                    await pagina.wait_for_timeout(3000)
+                    await pagina.wait_for_timeout(4000)
                 except Exception as e:
                     print(f"Fallo al escribir: {e}", flush=True)
 
@@ -162,10 +170,7 @@ async def ejecutar_tarea(request: Request):
                     await pagina.wait_for_load_state("networkidle")
                     await pagina.wait_for_timeout(2000)
                 except:
-                    try:
-                        await pagina.locator(f"[aria-label*='{texto}']").first.click(timeout=3000)
-                    except:
-                        pass
+                    pass
 
             elif accion.lower().startswith("navegar a"):
                 url = accion.lower().replace("navegar a", "").strip()
