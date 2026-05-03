@@ -2,7 +2,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from playwright.async_api import async_playwright
 from groq import Groq
+from supabase import create_client
 import base64
+import os
+import uuid
+from datetime import datetime
 
 app = FastAPI(
     title="Agente IA",
@@ -21,6 +25,10 @@ app.add_middleware(
 
 client = Groq(api_key="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")
 
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 ultima_pantalla = ""
 historial_pantallas = []
 
@@ -28,64 +36,7 @@ async def capturar_pantalla(page):
     screenshot = await page.screenshot(type="jpeg", quality=60)
     return base64.b64encode(screenshot).decode()
 
-async def preguntarle_a_groq(tarea, pantalla_base64, pasos_anteriores=[]):
-    pasos_str = "\n".join([f"- {p}" for p in pasos_anteriores]) if pasos_anteriores else "Ninguno todavía"
-    try:
-        respuesta = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"""Eres un agente que controla un navegador web.
-Tarea: {tarea}
-
-Pasos que ya has ejecutado:
-{pasos_str}
-
-REGLAS ESTRICTAS:
-- Responde SOLO con UNA línea
-- Sin explicaciones, sin puntos, sin comillas
-- NO repitas un paso que ya hayas hecho
-- Usa EXACTAMENTE uno de estos formatos:
-
-escribir_campo SELECTOR:::TEXTO
-click en TEXTO_DEL_BOTON
-navegar a URL
-tarea completada RESULTADO
-
-FLUJO DE LOGIN:
-1. Primero escribe el usuario en input[type='text']
-2. Luego escribe la contraseña en input[type='password']
-3. Luego haz click en el botón de entrar
-4. Si ya estás dentro responde tarea completada
-
-Si ya escribiste el usuario, escribe ahora la contraseña.
-Si ya escribiste usuario y contraseña, haz click en entrar.
-
-¿Qué acción hacer AHORA?"""
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{pantalla_base64}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=80
-        )
-        respuesta_texto = respuesta.choices[0].message.content.strip()
-        primera_linea = respuesta_texto.split('\n')[0].strip()
-        return primera_linea
-    except Exception as e:
-        print(f"Error en Groq: {e}", flush=True)
-        return "error"
-
-async def preguntarle_a_groq_documentos(tarea, pantalla_base64, pasos_anteriores=[]):
+async def preguntarle_a_groq(tarea, pantalla_base64, pasos_anteriores=[], prompt_extra=""):
     pasos_str = "\n".join([f"- {p}" for p in pasos_anteriores]) if pasos_anteriores else "Ninguno todavía"
     try:
         respuesta = client.chat.completions.create(
@@ -102,6 +53,8 @@ Tarea: {tarea}
 Pasos que ya has ejecutado:
 {pasos_str}
 
+{prompt_extra}
+
 REGLAS ESTRICTAS:
 - Responde SOLO con UNA línea
 - Sin explicaciones, sin puntos, sin comillas
@@ -112,15 +65,6 @@ escribir_campo SELECTOR:::TEXTO
 click en TEXTO_DEL_BOTON
 navegar a URL
 tarea completada RESULTADO
-
-FLUJO PARA DOCUMENTOS EN OVZNET:
-1. Hacer login con usuario y contraseña
-2. Una vez dentro buscar el menú "Documentos" en la barra superior
-3. Hacer click en "Documentos"
-4. Hacer click en el submenú "Documentos"
-5. Pulsar el botón "Buscar" para ver todos los documentos
-6. Si hay documentos en la lista, hacer click en el primero para descargarlo
-7. Responder tarea completada con la lista de documentos encontrados
 
 ¿Qué acción hacer AHORA?"""
                         },
@@ -142,7 +86,61 @@ FLUJO PARA DOCUMENTOS EN OVZNET:
         print(f"Error en Groq: {e}", flush=True)
         return "error"
 
-async def ejecutar_agente(pagina, tarea, funcion_groq, max_pasos=15):
+async def crear_contexto_navegador(p, carpeta_descargas="/tmp/descargas"):
+    os.makedirs(carpeta_descargas, exist_ok=True)
+    navegador = await p.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--single-process",
+            "--disable-blink-features=AutomationControlled"
+        ]
+    )
+    contexto = await navegador.new_context(
+        viewport={"width": 1280, "height": 720},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        java_script_enabled=True,
+        locale="es-ES",
+        timezone_id="Europe/Madrid",
+        accept_downloads=True
+    )
+    await contexto.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es'] });
+        window.chrome = { runtime: {} };
+    """)
+    return navegador, contexto
+
+async def subir_a_supabase(ruta_archivo, nombre_archivo, usuario):
+    try:
+        with open(ruta_archivo, "rb") as f:
+            contenido = f.read()
+        
+        fecha = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ruta_storage = f"{usuario}/{fecha}_{nombre_archivo}"
+        
+        supabase.storage.from_("documentos-ovznet").upload(
+            ruta_storage,
+            contenido,
+            {"content-type": "application/pdf"}
+        )
+        
+        url_firmada = supabase.storage.from_("documentos-ovznet").create_signed_url(
+            ruta_storage,
+            3600
+        )
+        
+        print(f"Archivo subido: {ruta_storage}", flush=True)
+        return url_firmada.get("signedURL", "")
+    except Exception as e:
+        print(f"Error subiendo a Supabase: {e}", flush=True)
+        return ""
+
+async def ejecutar_agente(pagina, tarea, max_pasos=15, prompt_extra=""):
     pasos = []
     for intento in range(max_pasos):
         print(f"--- Intento {intento + 1} ---", flush=True)
@@ -150,7 +148,7 @@ async def ejecutar_agente(pagina, tarea, funcion_groq, max_pasos=15):
         pantalla = await capturar_pantalla(pagina)
         global ultima_pantalla
         ultima_pantalla = pantalla
-        accion = await funcion_groq(tarea, pantalla, pasos)
+        accion = await preguntarle_a_groq(tarea, pantalla, pasos, prompt_extra)
         print(f"Acción: {accion}", flush=True)
         pasos.append(accion)
         historial_pantallas.append((accion, pantalla))
@@ -178,7 +176,7 @@ async def ejecutar_agente(pagina, tarea, funcion_groq, max_pasos=15):
         elif accion.lower().startswith("escribir"):
             texto_escribir = accion.lower().replace("escribir", "").strip()
             try:
-                selector = "input[type='text'], input[type='search'], textarea, [name='q'], [role='combobox'], [role='searchbox']"
+                selector = "input[type='text'], input[type='search'], textarea"
                 campo = await pagina.wait_for_selector(selector, timeout=5000)
                 await campo.click()
                 await campo.fill("")
@@ -218,33 +216,6 @@ async def ejecutar_agente(pagina, tarea, funcion_groq, max_pasos=15):
         await pagina.wait_for_timeout(1500)
 
     return pasos
-
-async def crear_contexto_navegador(p):
-    navegador = await p.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--single-process",
-            "--disable-blink-features=AutomationControlled"
-        ]
-    )
-    contexto = await navegador.new_context(
-        viewport={"width": 1280, "height": 720},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        java_script_enabled=True,
-        locale="es-ES",
-        timezone_id="Europe/Madrid"
-    )
-    await contexto.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['es-ES', 'es'] });
-        window.chrome = { runtime: {} };
-    """)
-    return navegador, contexto
 
 @app.get("/")
 def root():
@@ -299,6 +270,14 @@ async def ejecutar_tarea(request: Request):
     if usuario and password:
         tarea = f"{tarea}. Usuario: '{usuario}', Contraseña: '{password}'"
 
+    prompt_extra = """
+FLUJO DE LOGIN:
+1. Primero escribe el usuario en input[type='text']
+2. Luego escribe la contraseña en input[type='password']
+3. Luego haz click en el botón Entrar
+4. Si ya estás dentro responde tarea completada
+"""
+
     async with async_playwright() as p:
         navegador, contexto = await crear_contexto_navegador(p)
         pagina = await contexto.new_page()
@@ -306,7 +285,7 @@ async def ejecutar_tarea(request: Request):
         await pagina.wait_for_load_state("domcontentloaded")
         await pagina.wait_for_timeout(3000)
 
-        pasos = await ejecutar_agente(pagina, tarea, preguntarle_a_groq)
+        pasos = await ejecutar_agente(pagina, tarea, prompt_extra=prompt_extra)
 
         await navegador.close()
 
@@ -327,24 +306,58 @@ async def importar_documentos(request: Request):
     tipo_tramite = datos.get("tipo_tramite", "")
 
     tarea = f"""Entra en OVZnet con usuario '{usuario}' y contraseña '{password}'.
-Una vez dentro ve al menú 'Documentos' en la barra superior y haz click en el submenú 'Documentos'.
-Pulsa el botón 'Buscar' para ver todos los documentos disponibles.
-Si hay un tipo de trámite específico selecciona '{tipo_tramite}' antes de buscar.
-Anota todos los documentos que aparecen en la lista y responde con tarea completada indicando cuántos documentos encontraste."""
+Una vez dentro ve al menú Documentos en la barra superior y haz click en el submenú Documentos.
+Pulsa el botón Buscar para ver todos los documentos disponibles.
+Cuando veas la lista de documentos haz click en el número del primer documento para descargarlo."""
+
+    prompt_extra = """
+FLUJO PARA DESCARGAR DOCUMENTOS EN OVZNET:
+1. Escribe el usuario en input[type='text']
+2. Escribe la contraseña en input[type='password']
+3. Haz click en el botón Entrar
+4. Una vez dentro haz click en el menú Documentos
+5. Haz click en el submenú Documentos
+6. Pulsa el botón Buscar
+7. Haz click en el número del primer documento de la lista
+8. Espera a que se descargue y responde tarea completada
+"""
+
+    urls_documentos = []
 
     async with async_playwright() as p:
-        navegador, contexto = await crear_contexto_navegador(p)
+        carpeta_descargas = f"/tmp/descargas_{uuid.uuid4().hex}"
+        os.makedirs(carpeta_descargas, exist_ok=True)
+
+        navegador, contexto = await crear_contexto_navegador(p, carpeta_descargas)
+
         pagina = await contexto.new_page()
+
+        async def manejar_descarga(download):
+            nombre = download.suggested_filename or f"documento_{uuid.uuid4().hex}.pdf"
+            ruta = f"{carpeta_descargas}/{nombre}"
+            await download.save_as(ruta)
+            print(f"Descargado: {nombre}", flush=True)
+            url = await subir_a_supabase(ruta, nombre, usuario)
+            if url:
+                urls_documentos.append({
+                    "nombre": nombre,
+                    "url": url
+                })
+
+        pagina.on("download", manejar_descarga)
+
         await pagina.goto("https://ovznet.juntaex.es/")
         await pagina.wait_for_load_state("domcontentloaded")
         await pagina.wait_for_timeout(3000)
 
-        pasos = await ejecutar_agente(pagina, tarea, preguntarle_a_groq_documentos, max_pasos=20)
+        pasos = await ejecutar_agente(pagina, tarea, max_pasos=20, prompt_extra=prompt_extra)
 
+        await pagina.wait_for_timeout(5000)
         await navegador.close()
 
         return {
             "estado": "proceso terminado",
             "pasos": pasos,
+            "documentos_descargados": urls_documentos,
             "ver_pantallas": "https://agente-ganera.onrender.com/pantalla"
         }
